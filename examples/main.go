@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/yourusername/ctx"
+	"github.com/HoyoGey/ctx"
 )
 
 func main() {

@@ -12,10 +12,14 @@ func TestCTX(t *testing.T) {
 	}{
 		{
 			name: "current time",
-			time: time.Date(2025, 1, 2, 0, 9, 58, 0, time.FixedZone("UTC+5", 5*60*60)),
+			time: time.Date(2025, 1, 2, 0, 16, 27, 0, time.FixedZone("UTC+5", 5*60*60)),
 		},
 		{
-			name: "future time",
+			name: "future time 2099",
+			time: time.Date(2099, 12, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "very future time",
 			time: time.Date(2054, 12, 31, 23, 59, 59, 999999999, time.UTC),
 		},
 		{
@@ -47,6 +51,12 @@ func TestCTX(t *testing.T) {
 			restored := FromBytes(bytes)
 			if restored != ctx {
 				t.Errorf("FromBytes = %v, want %v", restored, ctx)
+			}
+
+			// Print the binary representation for the 2099 test case
+			if tt.name == "future time 2099" {
+				t.Logf("2099-12-01 binary: % X", bytes)
+				t.Logf("2099-12-01 restored: %v", restored.Time())
 			}
 		})
 	}
