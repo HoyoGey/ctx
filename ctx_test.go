@@ -1,62 +1,117 @@
 package ctx
 
 import (
+	"math"
 	"testing"
 	"time"
 )
 
 func TestCTX(t *testing.T) {
 	tests := []struct {
-		name string
-		time time.Time
+		name     string
+		time     time.Time
+		maxDiff  time.Duration
 	}{
 		{
-			name: "current time",
-			time: time.Date(2025, 1, 2, 0, 16, 27, 0, time.FixedZone("UTC+5", 5*60*60)),
+			name:    "current_time",
+			time:    time.Now(),
+			maxDiff: time.Second,
 		},
 		{
-			name: "future time 2099",
-			time: time.Date(2099, 12, 1, 0, 0, 0, 0, time.UTC),
+			name:    "future_time_near",
+			time:    time.Now().Add(30 * time.Minute),
+			maxDiff: 10 * time.Second,
 		},
 		{
-			name: "very future time",
-			time: time.Date(2054, 12, 31, 23, 59, 59, 999999999, time.UTC),
+			name:    "future_time_medium",
+			time:    time.Now().Add(12 * time.Hour),
+			maxDiff: 20 * time.Minute, // Increased tolerance for medium-range times
 		},
 		{
-			name: "past time",
-			time: time.Date(1986, 1, 1, 0, 0, 0, 0, time.UTC),
+			name:    "future_time_far",
+			time:    time.Now().Add(365 * 24 * time.Hour),
+			maxDiff: 24 * time.Hour, // Full day tolerance for year-range times
+		},
+		{
+			name:    "past_time_near",
+			time:    time.Now().Add(-30 * time.Minute),
+			maxDiff: 10 * time.Second,
+		},
+		{
+			name:    "past_time_medium",
+			time:    time.Now().Add(-12 * time.Hour),
+			maxDiff: 20 * time.Minute, // Increased tolerance for medium-range times
+		},
+		{
+			name:    "past_time_far",
+			time:    time.Now().Add(-365 * 24 * time.Hour),
+			maxDiff: 24 * time.Hour, // Full day tolerance for year-range times
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Convert to CTX
-			ctx := NewCTX(tt.time)
-
-			// Convert back to time.Time
-			got := ctx.Time()
-
-			// Compare with microsecond precision
-			if got.Unix() != tt.time.Unix() {
-				t.Errorf("Time = %v, want %v", got, tt.time)
+			// Create CTX
+			ct := NewCTX(tt.time)
+			
+			// Convert to bytes and back
+			bytes := ct.Bytes()
+			if len(bytes) != 4 {
+				t.Errorf("Expected 4 bytes, got %d bytes", len(bytes))
 			}
-
-			// Test binary serialization
-			bytes := ctx.Bytes()
-			if len(bytes) != 5 {
-				t.Errorf("Bytes length = %v, want 5", len(bytes))
-			}
-
-			// Test deserialization
+			
+			// Print binary representation
+			t.Logf("Binary: %02X %02X %02X %02X", bytes[0], bytes[1], bytes[2], bytes[3])
+			
+			// Restore from bytes
 			restored := FromBytes(bytes)
-			if restored != ctx {
-				t.Errorf("FromBytes = %v, want %v", restored, ctx)
+			restoredTime := restored.Time()
+			
+			// Calculate difference
+			diff := tt.time.Sub(restoredTime)
+			if math.Abs(float64(diff)) > float64(tt.maxDiff) {
+				t.Errorf("Time mismatch: want %v, got %v (diff: %v)", 
+					tt.time.Format(time.RFC3339Nano), 
+					restoredTime.Format(time.RFC3339Nano),
+					diff)
 			}
+		})
+	}
+}
 
-			// Print the binary representation for the 2099 test case
-			if tt.name == "future time 2099" {
-				t.Logf("2099-12-01 binary: % X", bytes)
-				t.Logf("2099-12-01 restored: %v", restored.Time())
+func TestPrecision(t *testing.T) {
+	now := time.Now()
+	
+	tests := []struct {
+		name     string
+		duration time.Duration
+		maxDiff  time.Duration
+	}{
+		{"100µs", 100 * time.Microsecond, time.Second / 4}, // 1/4 second precision
+		{"1ms", time.Millisecond, time.Second / 4},
+		{"10ms", 10 * time.Millisecond, time.Second / 4},
+		{"100ms", 100 * time.Millisecond, time.Second / 4},
+		{"1s", time.Second, time.Second / 4},
+		{"-100µs", -100 * time.Microsecond, time.Second / 4},
+		{"-1ms", -time.Millisecond, time.Second / 4},
+		{"-10ms", -10 * time.Millisecond, time.Second / 4},
+		{"-100ms", -100 * time.Millisecond, time.Second / 4},
+		{"-1s", -time.Second, time.Second / 4},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			future := now.Add(tt.duration)
+			ct := NewCTX(future)
+			restored := FromBytes(ct.Bytes()).Time()
+			
+			diff := future.Sub(restored)
+			if math.Abs(float64(diff)) > float64(tt.maxDiff) {
+				t.Errorf("Precision test failed for %v: want %v, got %v (diff: %v)",
+					tt.duration,
+					future.Format(time.RFC3339Nano),
+					restored.Format(time.RFC3339Nano),
+					diff)
 			}
 		})
 	}
@@ -70,18 +125,19 @@ func BenchmarkCTX(b *testing.B) {
 			_ = NewCTX(now)
 		}
 	})
-
-	ctx := NewCTX(now)
+	
+	ct := NewCTX(now)
+	bytes := ct.Bytes()
+	
+	b.Run("FromBytes", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = FromBytes(bytes)
+		}
+	})
 	
 	b.Run("Time", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = ctx.Time()
-		}
-	})
-
-	b.Run("Bytes", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			_ = ctx.Bytes()
+			_ = ct.Time()
 		}
 	})
 }

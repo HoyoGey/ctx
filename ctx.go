@@ -1,73 +1,122 @@
 package ctx
 
 import (
-	"encoding/binary"
+	"math"
 	"time"
 )
 
-// CTX represents a highly efficient time format that can store dates
-// far beyond the year 9999 while maintaining time fraction precision.
-// Structure (40 bits total):
-// - 35 bits: seconds since epoch (covers ±1000 years)
-// - 5 bits: time fraction (1/32 second precision)
-type CTX uint64
+type CTX uint32
 
 const (
-	// Epoch is set to 2000-01-01 to maximize the useful range
-	epoch       = 946684800  // 2000-01-01 00:00:00 UTC
-	secondMask  = 0x7FFFFFFFF // 35 bits for seconds
-	signBit     = 0x400000000 // Sign bit for negative values
-	nanoMask    = 0x1F        // 5 bits for time fraction
-	nanoDivisor = 31250000    // Convert to 1/32 second precision
+	scaleMask  = 0xC0000000 // 2 bits for scale
+	signMask   = 0x20000000 // 1 bit for sign
+	valueMask  = 0x1FFFF000 // 17 bits for value
+	extraMask  = 0x00000F00 // 4 bits for extra scale
+	fracMask   = 0x000000FF // 8 bits for fraction
+
+	scaleShift  = 30
+	signShift   = 29
+	valueShift  = 12
+	extraShift  = 8
+	fracShift   = 0
+
+	fracBits     = 8
+	fracMultiple = 1 << fracBits // 256 for 8 bits
+
+	// Scale values
+	scaleNano  = 0 // nanoseconds
+	scaleMicro = 1 // microseconds
+	scaleMilli = 2 // milliseconds
+	scaleSecond = 3 // seconds
 )
 
-// NewCTX creates a new CTX from a time.Time
+var scaleFactors = []float64{
+	1e-9,  // nanoseconds
+	1e-6,  // microseconds
+	1e-3,  // milliseconds
+	1,     // seconds
+}
+
 func NewCTX(t time.Time) CTX {
-	// Calculate seconds since epoch
-	delta := t.Unix() - epoch
-	var seconds uint64
+	// Calculate difference from Unix epoch
+	diff := t.UnixNano()
 	
-	if delta < 0 {
-		seconds = uint64(-delta) & (secondMask >> 1)
-		seconds |= signBit // Set sign bit for negative values
+	// Find the most appropriate scale
+	var scale, extra uint32
+	absDiff := math.Abs(float64(diff))
+	
+	if absDiff < 1e9 { // < 1 second
+		scale = scaleNano
+	} else if absDiff < 1e12 { // < 1000 seconds
+		scale = scaleMicro
+	} else if absDiff < 1e15 { // < 1M seconds
+		scale = scaleMilli
 	} else {
-		seconds = uint64(delta) & (secondMask >> 1)
+		scale = scaleSecond
 	}
 	
-	// Convert nanoseconds to our compact format (1/32 second precision)
-	nanos := uint64(t.Nanosecond()) / nanoDivisor
-	
-	// Combine into final format
-	return CTX((seconds) | (nanos << 35))
+	// Calculate extra scale (powers of 1000)
+	for absDiff >= float64(math.MaxInt32) {
+		absDiff /= 1000
+		extra++
+		if extra >= 15 { // 15 is max value for 4 bits
+			break
+		}
+	}
+
+	// Convert to selected scale
+	scaleFactor := scaleFactors[scale] * math.Pow(1000, float64(extra))
+	value := float64(diff) * scaleFactor
+
+	// Split into integer and fractional parts
+	intPart := uint32(math.Abs(float64(int64(value))))
+	fracPart := uint32((math.Abs(value) - float64(intPart)) * fracMultiple)
+
+	// Combine all parts
+	var result uint32
+	result |= scale << scaleShift
+	if diff < 0 {
+		result |= 1 << signShift
+	}
+	result |= (intPart & 0x1FFFF) << valueShift
+	result |= (extra & 0xF) << extraShift
+	result |= fracPart & 0xFF
+
+	return CTX(result)
 }
 
-// Time converts CTX back to time.Time
-func (ct CTX) Time() time.Time {
-	seconds := ct & secondMask
-	isNegative := (seconds & signBit) != 0
-	seconds &= (secondMask >> 1) // Clear sign bit
-	
-	var finalSeconds int64
+func (c CTX) Time() time.Time {
+	// Extract components
+	scale := (uint32(c) & scaleMask) >> scaleShift
+	isNegative := (uint32(c) & signMask) != 0
+	value := (uint32(c) & valueMask) >> valueShift
+	extra := (uint32(c) & extraMask) >> extraShift
+	frac := float64(uint32(c)&fracMask) / fracMultiple
+
+	// Calculate total value
+	scaleFactor := scaleFactors[scale] * math.Pow(1000, float64(extra))
+	totalValue := (float64(value) + frac) / scaleFactor
+
 	if isNegative {
-		finalSeconds = -int64(seconds)
-	} else {
-		finalSeconds = int64(seconds)
+		totalValue = -totalValue
 	}
-	
-	nanos := (ct >> 35) * nanoDivisor
-	return time.Unix(finalSeconds+epoch, int64(nanos))
+
+	// Convert to time
+	return time.Unix(0, int64(totalValue))
 }
 
-// Bytes converts CTX to a 5-byte slice
-func (ct CTX) Bytes() []byte {
-	b := make([]byte, 5)
-	binary.BigEndian.PutUint32(b[0:4], uint32(ct>>8))
-	b[4] = byte(ct)
-	return b
+func (c CTX) Bytes() []byte {
+	return []byte{
+		byte(uint32(c) >> 24),
+		byte(uint32(c) >> 16),
+		byte(uint32(c) >> 8),
+		byte(uint32(c)),
+	}
 }
 
-// FromBytes creates CTX from a 5-byte slice
 func FromBytes(b []byte) CTX {
-	high := uint64(binary.BigEndian.Uint32(b[0:4]))
-	return CTX(high<<8 | uint64(b[4]))
+	if len(b) != 4 {
+		return 0
+	}
+	return CTX(uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3]))
 }
